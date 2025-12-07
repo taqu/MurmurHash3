@@ -10,9 +10,11 @@ namespace MurmurHash
 {
     public static class MurmurHash3
     {
-        public const ulong C1 = 0x87c37b91114253d5UL;
-        public const ulong C2 = 0x4cf5ad432745937fUL;
-        public const int BufferSize = 16;
+        public const ulong C0 = 0xC6A4A7935BD1E995UL;
+        public const ulong C1 = 0x87C37B91114253D5UL;
+        public const ulong C2 = 0x4CF5AD432745937FUL;
+        public const int BufferSize8 = 8;
+        public const int BufferSize16 = 16;
 
         public struct State32
         {
@@ -20,15 +22,29 @@ namespace MurmurHash
             public long length_;
         }
 
-        public class State
+        public class State64
+        {
+            public ulong h_;
+            public long length_;
+            public int remaining_;
+            public byte[] buffer_ = new byte[BufferSize8];
+        }
+
+        public class State128
         {
             public ulong h1_;
             public ulong h2_;
             public long length_;
             public int remaining_;
-            public byte[] buffer_ = new byte[BufferSize];
+            public byte[] buffer_ = new byte[BufferSize16];
         }
 
+        #region 32bit
+        /// <summary>
+        /// Scrambling 32bit data
+        /// </summary>
+        /// <param name="x"></param>
+        /// <returns>scrambled x</returns>
         public static uint Scramble(uint x)
         {
             x *= 0xCC9E2D51U;
@@ -91,6 +107,14 @@ namespace MurmurHash
 
         public static byte[] Finalize32(State32 state)
         {
+            uint h = FinalizeRaw32(state);
+            byte[] r = new byte[4];
+            Reverse(r, h);
+            return r;
+        }
+
+        public static uint FinalizeRaw32(State32 state)
+        {
             uint h = state.x_;
             h ^= (uint)state.length_;
             h ^= h >> 16;
@@ -98,84 +122,219 @@ namespace MurmurHash
             h ^= h >> 13;
             h *= 0xC2B2AE35;
             h ^= h >> 16;
-
-            byte[] r = new byte[4];
-            Reverse(r, h);
-            return r;
+            return h;
         }
+        #endregion
 
-        private static void Reverse(byte[] bytes, uint value)
+        #region 64bit
+        public static byte[] ComputeHash64(byte[] buffer)
         {
-            bytes[0] = (byte)((value & 0xFF000000U) >> 24);
-            bytes[1] = (byte)((value & 0x00FF0000U) >> 16);
-            bytes[2] = (byte)((value & 0x0000FF00U) >> 8);
-            bytes[3] = (byte)((value & 0x000000FFU) >> 0);
+            State64 state = new State64();
+            Update64(state, buffer);
+            return Finalize64(state);
         }
 
+        public static byte[] ComputeHash64(byte[] buffer, long offset, long length)
+        {
+            State64 state = new State64();
+            Update64(state, buffer, offset, length);
+            return Finalize64(state);
+        }
+
+        public static void Update64(State64 state, byte[] buffer)
+        {
+            Update64(state, buffer, 0, buffer.LongLength);
+        }
+
+        public static void Scramble64(ref ulong h, ulong k)
+        {
+            k *= C0;
+            k ^= k >> 47;
+            k *= C0;
+
+            h ^= k;
+            h *= C0;
+        }
+
+        public static void Update64(State64 state, byte[] buffer, long offset, long length)
+        {
+            System.Diagnostics.Debug.Assert(buffer != null);
+            ulong h1 = state.h_;
+            long o = offset;
+            long end = offset + length;
+            while (o < end)
+            {
+                long l = end - o;
+                long r = BufferSize8 - state.remaining_;
+                if (l < r)
+                {
+                    System.Array.Copy(buffer, o, state.buffer_, state.remaining_, l);
+                    state.remaining_ += (int)l;
+                    System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize8);
+                    break;
+                }
+                System.Array.Copy(buffer, o, state.buffer_, state.remaining_, r);
+                o += r;
+                System.Diagnostics.Debug.Assert(BufferSize8 == (state.remaining_ + (int)r));
+                ulong k1 = ToUlong(state.buffer_, 0);
+                Scramble64(ref h1, k1);
+                state.remaining_ = 0;
+            }
+            state.h_ = h1;
+            state.length_ += length;
+        }
+
+        public static byte[] ComputeHash64(System.IO.Stream stream)
+        {
+            State64 state = new State64();
+            state = Update64(state, stream);
+            return Finalize64(state);
+        }
+
+        public static State64 Update64(State64 state, System.IO.Stream stream)
+        {
+            System.Diagnostics.Debug.Assert(stream != null);
+            System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize8);
+            ulong h1 = state.h_;
+            long length = 0;
+            for (; ; )
+            {
+                int l = BufferSize8 - (int)state.remaining_;
+                int readSize = stream.Read(state.buffer_, state.remaining_, l);
+                state.remaining_ += readSize;
+                length += readSize;
+                if (BufferSize8 <= state.remaining_)
+                {
+                    ulong k1 = ToUlong(state.buffer_, 0);
+                    Scramble64(ref h1, k1);
+                    state.remaining_ = 0;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize8);
+                    break;
+                }
+            }
+
+            state.h_ = h1;
+            state.length_ += length;
+            return state;
+        }
+
+        public static byte[] Finalize64(State64 state)
+        {
+            ulong h = FinalizeRaw64(state);
+            byte[] ret = new byte[8];
+            Reverse(ret, 0, h);
+            return ret;
+        }
+
+        public static ulong FinalizeRaw64(State64 state)
+        {
+            ulong h = state.h_;
+
+            if (0 < state.remaining_)
+            {
+                System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize8);
+                switch (state.remaining_)
+                {
+                    case 7:
+                        h ^= (ulong)state.buffer_[6] << 48;
+                        goto case 6;
+                    case 6:
+                        h ^= (ulong)state.buffer_[5] << 40;
+                        goto case 5;
+                    case 5:
+                        h ^= (ulong)state.buffer_[4] << 32;
+                        goto case 4;
+                    case 4:
+                        h ^= (ulong)state.buffer_[3] << 24;
+                        goto case 3;
+                    case 3:
+                        h ^= (ulong)state.buffer_[2] << 16;
+                        goto case 2;
+                    case 2:
+                        h ^= (ulong)state.buffer_[1] << 8;
+                        goto case 1;
+                    case 1:
+                        h ^= state.buffer_[0];
+                        h *= C0;
+                        break;
+                }
+            }
+
+            h ^= h >> 47;
+            h *= C0;
+            h ^= h >> 47;
+            return h;
+        }
+        #endregion
+
+        #region 128bit
         public static byte[] ComputeHash128(byte[] buffer)
         {
-            State state = new State();
+            State128 state = new State128();
             Update128(state, buffer);
             return Finalize128(state);
         }
 
         public static byte[] ComputeHash128(byte[] buffer, long offset, long length)
         {
-            State state = new State();
+            State128 state = new State128();
             Update128(state, buffer, offset, length);
             return Finalize128(state);
         }
 
-        public static void Update128(State state, byte[] buffer)
+        public static void Update128(State128 state, byte[] buffer)
         {
             Update128(state, buffer, 0, buffer.LongLength);
         }
 
-        public static void Update128(State state, byte[] buffer, long offset, long length)
+        public static void Scramble128(ref ulong h1, ref ulong h2, ulong k1, ulong k2)
+        {
+            k1 *= C1;
+            k1 = (k1 << 31) | (k1 >> (64 - 31));
+            k1 *= C2;
+            h1 ^= k1;
+
+            h1 = (h1 << 27) | (h1 >> (64 - 27));
+            h1 += h2;
+            h1 = h1 * 5 + 0x52dce729;
+
+            k2 *= C2;
+            k2 = (k2 << 33) | (k2 >> (64 - 33));
+            k2 *= C1;
+            h2 ^= k2;
+
+            h2 = (h2 << 31) | (h2 >> (64 - 31));
+            h2 += h1;
+            h2 = h2 * 5 + 0x38495ab5;
+        }
+
+        public static void Update128(State128 state, byte[] buffer, long offset, long length)
         {
             System.Diagnostics.Debug.Assert(buffer != null);
             ulong h1 = state.h1_;
             ulong h2 = state.h2_;
-            ulong k1;
-            ulong k2;
             long o = offset;
-            long bo = state.remaining_;
             long end = offset + length;
             while (o < end)
             {
                 long l = end - o;
-                long r = BufferSize - state.remaining_;
+                long r = BufferSize16 - state.remaining_;
                 if (l < r)
                 {
                     System.Array.Copy(buffer, o, state.buffer_, state.remaining_, l);
                     state.remaining_ += (int)l;
-                    o += l;
-                    System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize);
+                    System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize16);
                     break;
                 }
                 System.Array.Copy(buffer, o, state.buffer_, state.remaining_, r);
-                state.remaining_ += (int)r;
                 o += r;
-                System.Diagnostics.Debug.Assert(BufferSize == state.remaining_);
-                k1 = ToUlong(state.buffer_, 0);
-                k2 = ToUlong(state.buffer_, 8);
-                k1 *= C1;
-                k1 = (k1 << 31) | (k1 >> (64 - 31)); // ROTL64(k1, 31);
-                k1 *= C2;
-                h1 ^= k1;
-
-                h1 = (h1 << 27) | (h1 >> (64 - 27)); // ROTL64(h1, 27);
-                h1 += h2;
-                h1 = h1 * 5 + 0x52dce729;
-
-                k2 *= C2;
-                k2 = (k2 << 33) | (k2 >> (64 - 33)); // ROTL64(k2, 33);
-                k2 *= C1;
-                h2 ^= k2;
-
-                h2 = (h2 << 31) | (h2 >> (64 - 31)); // ROTL64(h2, 31);
-                h2 += h1;
-                h2 = h2 * 5 + 0x38495ab5;
+                System.Diagnostics.Debug.Assert(BufferSize16 == (state.remaining_ + (int)r));
+                ulong k1 = ToUlong(state.buffer_, 0);
+                ulong k2 = ToUlong(state.buffer_, 8);
+                Scramble128(ref h1, ref h2, k1, k2);
                 state.remaining_ = 0;
             }
             state.h1_ = h1;
@@ -183,65 +342,36 @@ namespace MurmurHash
             state.length_ += length;
         }
 
-        public static ulong ToUlong(byte[] buffer, int offset)
-        {
-            return ((ulong)buffer[offset + 0] << 0) |
-                   ((ulong)buffer[offset + 1] << 8) |
-                   ((ulong)buffer[offset + 2] << 16) |
-                   ((ulong)buffer[offset + 3] << 24) |
-                   ((ulong)buffer[offset + 4] << 32) |
-                   ((ulong)buffer[offset + 5] << 40) |
-                   ((ulong)buffer[offset + 6] << 48) |
-                   ((ulong)buffer[offset + 7] << 56);
-        }
-
         public static byte[] ComputeHash128(System.IO.Stream stream)
         {
-            State state = new State();
+            State128 state = new State128();
             state = Update128(state, stream);
             return Finalize128(state);
         }
 
-        public static State Update128(State state, System.IO.Stream stream)
+        public static State128 Update128(State128 state, System.IO.Stream stream)
         {
             System.Diagnostics.Debug.Assert(stream != null);
-            System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize);
+            System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize16);
             ulong h1 = state.h1_;
             ulong h2 = state.h2_;
             long length = 0;
             for (; ; )
             {
-                int l = BufferSize - (int)state.remaining_;
+                int l = BufferSize16 - (int)state.remaining_;
                 int readSize = stream.Read(state.buffer_, state.remaining_, l);
                 state.remaining_ += readSize;
                 length += readSize;
-                if (BufferSize <= state.remaining_)
+                if (BufferSize16 <= state.remaining_)
                 {
                     ulong k1 = ToUlong(state.buffer_, 0);
                     ulong k2 = ToUlong(state.buffer_, 8);
-
-                    k1 *= C1;
-                    k1 = (k1 << 31) | (k1 >> (64 - 31)); // ROTL64(k1, 31);
-                    k1 *= C2;
-                    h1 ^= k1;
-
-                    h1 = (h1 << 27) | (h1 >> (64 - 27)); // ROTL64(h1, 27);
-                    h1 += h2;
-                    h1 = h1 * 5 + 0x52dce729;
-
-                    k2 *= C2;
-                    k2 = (k2 << 33) | (k2 >> (64 - 33)); // ROTL64(k2, 33);
-                    k2 *= C1;
-                    h2 ^= k2;
-
-                    h2 = (h2 << 31) | (h2 >> (64 - 31)); // ROTL64(h2, 31);
-                    h2 += h1;
-                    h2 = h2 * 5 + 0x38495ab5;
+                    Scramble128(ref h1, ref h2, k1, k2);
                     state.remaining_ = 0;
                 }
                 else
                 {
-                    System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize);
+                    System.Diagnostics.Debug.Assert(state.remaining_ < BufferSize16);
                     break;
                 }
             }
@@ -252,7 +382,16 @@ namespace MurmurHash
             return state;
         }
 
-        public static byte[] Finalize128(State state)
+        public static byte[] Finalize128(State128 state)
+        {
+            (ulong h1, ulong h2) h = FinalizeRaw128(state);
+            byte[] ret = new byte[16];
+            Reverse(ret, 0, h.h1);
+            Reverse(ret, 8, h.h2);
+            return ret;
+        }
+
+        public static (ulong h1, ulong h2) FinalizeRaw128(State128 state)
         {
             ulong h1 = state.h1_;
             ulong h2 = state.h2_;
@@ -284,7 +423,7 @@ namespace MurmurHash
                     case 9:
                         k2 ^= state.buffer_[8];
                         k2 *= C2;
-                        k2 = (k2 << 33) | (k2 >> (64 - 33)); // ROTL64(k2, 33);
+                        k2 = (k2 << 33) | (k2 >> (64 - 33));
                         k2 *= C1;
                         h2 ^= k2;
                         goto case 8;
@@ -312,7 +451,7 @@ namespace MurmurHash
                     case 1:
                         k1 ^= state.buffer_[0];
                         k1 *= C1;
-                        k1 = (k1 << 31) | (k1 >> (64 - 31)); // ROTL64(k1, 31);
+                        k1 = (k1 << 31) | (k1 >> (64 - 31));
                         k1 *= C2;
                         h1 ^= k1;
                         break;
@@ -326,19 +465,29 @@ namespace MurmurHash
             h1 += h2;
             h2 += h1;
 
-            h1 = FMix64(h1);
-            h2 = FMix64(h2);
+            h1 = Mix64(h1);
+            h2 = Mix64(h2);
 
             h1 += h2;
             h2 += h1;
 
-            byte[] ret = new byte[16];
-            Reverse(ret, 0, h1);
-            Reverse(ret, 8, h2);
-            return ret;
+            return (h1, h2);
+        }
+        #endregion
+
+        public static ulong ToUlong(byte[] buffer, int offset)
+        {
+            return ((ulong)buffer[offset + 0] << 0) |
+                   ((ulong)buffer[offset + 1] << 8) |
+                   ((ulong)buffer[offset + 2] << 16) |
+                   ((ulong)buffer[offset + 3] << 24) |
+                   ((ulong)buffer[offset + 4] << 32) |
+                   ((ulong)buffer[offset + 5] << 40) |
+                   ((ulong)buffer[offset + 6] << 48) |
+                   ((ulong)buffer[offset + 7] << 56);
         }
 
-        private static ulong FMix64(ulong k)
+        private static ulong Mix64(ulong k)
         {
             k ^= k >> 33;
             k *= 0xff51afd7ed558ccd;
@@ -346,6 +495,14 @@ namespace MurmurHash
             k *= 0xc4ceb9fe1a85ec53;
             k ^= k >> 33;
             return k;
+        }
+
+        private static void Reverse(byte[] bytes, uint value)
+        {
+            bytes[0] = (byte)((value & 0xFF000000U) >> 24);
+            bytes[1] = (byte)((value & 0x00FF0000U) >> 16);
+            bytes[2] = (byte)((value & 0x0000FF00U) >> 8);
+            bytes[3] = (byte)((value & 0x000000FFU) >> 0);
         }
 
         private static void Reverse(byte[] bytes, int offset, ulong value)
